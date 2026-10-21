@@ -1,0 +1,10 @@
+[project]
+name = "pickdata-agent"
+version = "0.1.0"
+description = "PickData Copilot - observable data agent for logistics picking & sorting"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
