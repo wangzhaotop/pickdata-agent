@@ -1,0 +1,202 @@
+name: ${COMPOSE_PROJECT_NAME:-pickdata}
+
+services:
+  mysql:
+    image: ${MYSQL_IMAGE:-mysql:8.0}
+    container_name: pickdata-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-pickdata_root_dev}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-pickdata}
+      MYSQL_USER: ${MYSQL_USER:-pickdata}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-pickdata_app_dev}
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./mysql/my.cnf:/etc/mysql/conf.d/pickdata.cnf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks:
+      - pickdata
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:7.4-alpine}
+    container_name: pickdata-redis
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-pickdata_redis_dev}
+      TZ: ${TZ:-Asia/Shanghai}
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - "${REDIS_PASSWORD:-pickdata_redis_dev}"
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - allkeys-lru
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks:
+      - pickdata
+
+  etcd:
+    image: ${ETCD_IMAGE:-quay.io/coreos/etcd:v3.5.18}
+    container_name: pickdata-etcd
+    restart: unless-stopped
+    profiles: ["vector"]
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    command:
+      - etcd
+      - -advertise-client-urls=http://etcd:2379
+      - -listen-client-urls=http://0.0.0.0:2379
+      - --data-dir
+      - /etcd
+    volumes:
+      - etcd-data:/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      - pickdata
+
+  minio:
+    image: ${MINIO_IMAGE:-minio/minio:RELEASE.2024-12-18T13-15-44Z}
+    container_name: pickdata-minio
+    restart: unless-stopped
+    profiles: ["vector"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-pickdata}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-pickdata_minio_dev}
+      TZ: ${TZ:-Asia/Shanghai}
+    command: minio server /minio_data --console-address ":9001"
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/minio_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      - pickdata
+
+  milvus:
+    image: ${MILVUS_IMAGE:-milvusdb/milvus:v2.5.9}
+    container_name: pickdata-milvus
+    restart: unless-stopped
+    profiles: ["vector"]
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-pickdata}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-pickdata_minio_dev}
+      MINIO_BUCKET_NAME: ${MINIO_BUCKET:-milvus}
+      MINIO_USE_SSL: "false"
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "${MILVUS_PORT:-19530}:19530"
+      - "${MILVUS_HEALTH_PORT:-9091}:9091"
+    volumes:
+      - milvus-data:/var/lib/milvus
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+    networks:
+      - pickdata
+
+  rocketmq-namesrv:
+    image: ${ROCKETMQ_IMAGE:-apache/rocketmq:5.3.2}
+    container_name: pickdata-rocketmq-namesrv
+    restart: unless-stopped
+    profiles: ["mq"]
+    environment:
+      JAVA_OPT_EXT: -server -Xms256m -Xmx256m -Xmn128m
+      TZ: ${TZ:-Asia/Shanghai}
+    command: ["sh", "mqnamesrv"]
+    ports:
+      - "${ROCKETMQ_NAMESRV_PORT:-9876}:9876"
+    volumes:
+      - rocketmq-namesrv-logs:/home/rocketmq/logs
+    networks:
+      - pickdata
+
+  rocketmq-broker:
+    image: ${ROCKETMQ_IMAGE:-apache/rocketmq:5.3.2}
+    container_name: pickdata-rocketmq-broker
+    restart: unless-stopped
+    profiles: ["mq"]
+    environment:
+      NAMESRV_ADDR: rocketmq-namesrv:9876
+      JAVA_OPT_EXT: -server -Xms512m -Xmx512m -Xmn256m
+      TZ: ${TZ:-Asia/Shanghai}
+    command:
+      - sh
+      - mqbroker
+      - -n
+      - rocketmq-namesrv:9876
+      - -c
+      - /home/rocketmq/broker.conf
+    ports:
+      - "${ROCKETMQ_BROKER_HA_PORT:-10909}:10909"
+      - "${ROCKETMQ_BROKER_PORT:-10911}:10911"
+      - "${ROCKETMQ_BROKER_FAST_PORT:-10912}:10912"
+    volumes:
+      - rocketmq-broker-logs:/home/rocketmq/logs
+      - rocketmq-broker-store:/home/rocketmq/store
+      - ./rocketmq/broker.conf:/home/rocketmq/broker.conf:ro
+    depends_on:
+      rocketmq-namesrv:
+        condition: service_started
+    networks:
+      - pickdata
+
+volumes:
+  mysql-data:
+  redis-data:
+  etcd-data:
+  minio-data:
+  milvus-data:
+  rocketmq-namesrv-logs:
+  rocketmq-broker-logs:
+  rocketmq-broker-store:
+
+networks:
+  pickdata:
+    name: pickdata-middleware
+    driver: bridge

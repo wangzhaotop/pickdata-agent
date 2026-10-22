@@ -1,7 +1,7 @@
 [project]
 name = "pickdata-agent"
 version = "0.1.0"
-description = "PickData Copilot - observable data agent for logistics picking & sorting"
+description = "PickData Copilot - an observable, domain-agnostic data agent for natural-language analytics and root-cause exploration"
 requires-python = ">=3.11"
 dependencies = []
 
